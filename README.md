@@ -1,97 +1,112 @@
-# Sistema de Extracción de Datos y Modelización Estadística del Rendimiento Deportivo (LaLiga)
+# LaLiga expected goals — regression, ANOVA and ANCOVA with full model diagnostics
 
-Este repositorio contiene un ecosistema completo de herramientas diseñado para el **Web Scraping, Procesamiento de Datos (ETL) y Modelización Estadística Avanzada** aplicado al rendimiento de los equipos de fútbol de la Primera División de España (LaLiga). 
+A Python scraping/ETL pipeline that builds a match-level LaLiga dataset from FBref, followed by an
+R analysis that explains each team's expected goals (xG) in a match from team and opponent
+profiles, tests for home advantage and checks whether attacking metrics translate into xG
+differently at home and away.
 
-El proyecto se divide en dos fases fundamentales:
-1. **Pipeline de Obtención y Preparación de Datos (Python):** Un conjunto de scripts que automatizan la extracción de datos históricos y estadísticas avanzadas directamente desde la web, procesándolos mediante un sistema de medias ponderadas temporales.
-2. **Análisis Estadístico y Modelización (R):** Un estudio profundo fundamentado en modelos de regresión lineal múltiple, ANOVA y ANCOVA para evaluar variables de ataque, cuantificar estadísticamente el "factor campo" (localía) e inferir patrones de comportamiento en la generación de goles esperados ($xG$).
+## The problem
 
----
+Football commentary takes home advantage and "attacking quality" for granted. This project asks
+how much of a team's match xG can be explained by simple season-level team and opponent profiles,
+whether home advantage in xG is statistically detectable, and whether the relationship between
+attacking metrics and xG changes with venue — while checking, rather than assuming, the
+assumptions behind the linear-model inference.
 
-## 🛠️ Fase 1: Pipeline de Obtención de Datos (Python)
+## At a glance
 
-La arquitectura de extracción de datos está construida sobre **Pandas** y utiliza técnicas de Web Scraping automatizado para consolidar datasets desde el portal estadístico *FBref*.
+| | |
+|---|---|
+| **Data** | FBref LaLiga fixtures (match xG) and squad statistics, scraped with `pandas.read_html`; one row per team per match |
+| **Methods** | OLS with VIF analysis and AIC stepwise selection; one-way ANOVA on venue; ANCOVA with and without venue × covariate interactions; residual, leverage and Cook's-distance diagnostics; Shapiro–Wilk, Breusch–Pagan, Harrison–McCabe, Ramsey RESET, Levene and per-team Durbin–Watson tests; refits without outliers |
+| **Main findings** (as recorded in `script.R`) | Teams generate on average **0.27–0.42 more xG per match at home** (ANOVA, adjusted R² 0.047); a venue × attacking-metric interaction model is preferred over the additive ANCOVA (F-test p ≈ 3·10⁻⁴) |
+| **Caveat** | Normality, homoscedasticity and independence are **rejected** by the diagnostics, so p-values and intervals are approximate; see *Limitations* |
+| **Status** | Completed exploratory statistics project. Data are not included, so results are not reproducible from this repository alone |
 
-### 1. `Partidos.py` (Scraping de Calendario y Resultados)
-Este script es el punto de partida del pipeline de partidos. Se encarga de descargar las tablas de emparejamientos y métricas básicas de los encuentros de las temporadas seleccionadas (`2023-2024`, `2024-2025`, `2025-2026`).
-* **Web Scraping:** Mediante `pd.read_html()`, se conecta de forma dinámica a las URLs oficiales de resultados y fixtures de LaLiga en FBref.
-* **Transformación de Datos:** * Renombra columnas complejas para simplificar el manejo de los goles esperados (`xG` y `xG.1`) a parámetros legibles (`xG Local` y `xG Visitante`).
-  * Realiza limpieza de datos eliminando registros nulos o vacíos que corresponden a separadores estéticos dentro de las tablas web (`.dropna()`).
-* **Normalización Estructural:** Duplica conceptualmente el conjunto de datos por partido para transformar un registro único (*Equipo Local vs Equipo Visitante*) en dos registros individuales independientes orientados a filas (*Registro de actuación de Equipo X como Local* y *Registro de actuación de Equipo Y como Visitante*). Esto permite analizar la variable categórica `Localía` de forma directa en los modelos de regresión.
+## Results
 
-### 2. `Datos por equipo.py` (Scraping de Estadísticas Avanzadas)
-Extrae el rendimiento consolidado de cada club a lo largo de las temporadas en formato de métricas acumuladas y ratios por 90 minutos de juego.
-* **Consolidación Multitabla:** Descarga de forma masiva e indexa múltiples tablas estadísticas de FBref (Estadísticas estándar, Rendimiento de portería corriente, Portería avanzada, Métricas de disparo y Ratios de creación de tiros/goles).
-* **Mapeo de Variables Críticas:** Extrae y normaliza parámetros avanzados como:
-  * Goles y asistencias promedio por partido.
-  * Goles por tiro y goles por tiro a puerta realizados.
-  * Goles recibidos por tiro y por tiro a puerta permitidos al rival.
-  * Distancia media de disparo (convertida matemáticamente de yardas a metros multiplicando por `0.9144`).
-  * Acciones de Creación de Goles por 90 minutos (`GCA90`) tanto a favor como en contra.
-* **Integración de Clasificación:** Cruza la tabla estadística con la posición en la tabla de clasificación (`Rank`) alcanzada en dicha temporada para dotar de contexto competitivo al dataset.
+These values are written in the analysis comments of `script.R`; the dataset they were computed on
+is not committed, so they **were not re-run** for this README.
 
-### 3. `Medias_ponderadas.py` (Suavizado Temporal de Rendimiento)
-Dado que un equipo puede cambiar radicalmente su plantilla o dinámica entre temporadas, este módulo implementa una **función de agregación personalizada** para ponderar el rendimiento histórico, dándole mayor relevancia a las temporadas más recientes.
-* **Lógica del Algoritmo de Pesos:**
-  * Si un equipo ha competido las **3 temporadas** analizadas: los pesos asignados son `[0.29, 0.45, 0.26]` de forma cronológica inversa (ponderando con mayor rigor la temporada intermedia y la más reciente según la distribución competitiva).
-  * Si ha competido durante **2 temporadas** (por ejemplo, un equipo que ascendió recientemente): se aplica dinámicamente un esquema de pesos `[0.3, 0.7]` si incluye la temporada `2025-2026`, o un factor estándar de `[0.75, 0.25]` en su defecto.
-  * Si solo dispone de **1 temporada** en la categoría: se mantiene el valor íntegro con un peso único de `1`.
-* **Operación Matricial:** Realiza un producto matricial (`@`) entre los datos numéricos transpuestos de los grupos y el vector de pesos determinado, devolviendo un perfil analítico suavizado y unificado por equipo.
+| Question | Result | Method |
+|---|---|---|
+| Is mean xG higher at home? | Yes: difference of 0.27–0.42 xG per match (95% Tukey HSD interval); p < 2.2·10⁻¹⁶ | One-way ANOVA, `xG ~ venue` |
+| How much variance does venue alone explain? | Adjusted R² = 0.047 | Same model |
+| Do continuous attacking metrics add information beyond venue? | Yes (p < 2.2·10⁻¹⁶) | F-test, ANOVA vs ANCOVA |
+| Do slopes differ between home and away? | Interaction model preferred (p ≈ 3·10⁻⁴) | F-test, additive vs interaction ANCOVA |
+| Are OLS assumptions met? | Linearity accepted (RESET p = 0.37); normality (Shapiro–Wilk p < 2.2·10⁻¹⁶), homoscedasticity (Breusch–Pagan p ≈ 7·10⁻¹⁰) and independence (Durbin–Watson, rejected for all teams but one) **not met** | Residual diagnostics; unchanged after removing outliers |
 
-### 4. `Obtencion de los datos.py` (Orquestador ETL Final)
-Actúa como el script maestro que fusiona los flujos de información generados anteriormente.
-* **Carga e Intersección:** Lee los archivos maestros de partidos y el consolidado histórico suavizado por equipos.
-* **Ingeniería de Características Cruzadas:** Realiza iteraciones sobre cada partido emparejando la fila con las estadísticas ponderadas del equipo en cuestión (actuando como local o visitante) e intersectándolas simultáneamente con el perfil defensivo y de posesión de su rival de turno.
-* **Output Concluyente:** Genera un archivo optimizado listo para ser importado por el motor estadístico de R.
+The stepwise model retains five predictors: own possession, own goals per match, own assists per
+match, opponent saves per match and goal-creating actions conceded by the opponent (all VIF < 2.5).
 
----
+## Data and provenance
 
-## 📊 Fase 2: Análisis Estadístico y Modelización (R)
+- **Source:** [FBref](https://fbref.com/en/comps/12/La-Liga-Stats) LaLiga pages — *Scores & Fixtures*
+  (match xG) and squad / opponent statistics tables (standard, goalkeeping, shooting, goal and shot
+  creation). FBref data are subject to Sports Reference's
+  [data-use terms](https://www.sports-reference.com/data_use.html); the raw data are not
+  redistributed here.
+- **Seasons:** the scripts currently request 2023-24, 2024-25 and 2025-26. The R analysis
+  describes its data as "the last two seasons", so the published results were computed on an
+  earlier, two-season version of the dataset.
+- **Unit of observation:** each match appears twice (once per team, with a home/away indicator).
+- **Team profiles:** squad statistics are combined across seasons with a fixed weighted average
+  (`Medias_ponderadas.py`) and attached to every match of that team, together with the opponent's
+  profile.
 
-El script `script.R` procesa el dataset resultante para validar teorías futbolísticas mediante un enfoque matemático riguroso. Utiliza librerías de prestigio como `car` para diagnósticos, `lmtest` para contrastes de hipótesis analíticos, `ggcorrplot` para exploración visual y `sm` para densidades no paramétricas.
+## Methodology
 
-### 1. Análisis Exploratorio y Correlaciones
-* **Garantía de Reproducibilidad:** Fija una semilla aleatoria (`set.seed(1759)`) para asegurar que cualquier remuestreo o cálculo numérico sea perfectamente reproducible.
-* **Matrices de Correlación:** Genera mapas térmicos estadísticos (`ggcorrplot`) entre la variable dependiente central —**goles esperados ($xG$)**— y los predictores potenciales (posesión propia, posesión rival, goles previos, asistencias previas, volumen de disparos y acciones de creación de tiros). Esto descarta predictores redundantes y previene la multicolinealidad.
+1. `Partidos.py` — scrape fixtures, keep match xG, reshape to one row per team-match → `Partidos.csv`.
+2. `Datos por equipo.py` — scrape squad and opponent tables per season, derive per-match rates
+   (e.g. goals per shot, shot distance converted to metres), fill missing penalty stats with 0,
+   apply the weighted average → `DatosEquipos.csv`.
+3. `Obtencion de los datos.py` — join own and opponent profiles to every team-match →
+   `Datos_partidos.xlsx`.
+4. `script.R` — exploratory plots, OLS + collinearity treatment, diagnostics, ANOVA, ANCOVA with
+   interactions, and validation of each model (comments in Galician).
 
-### 2. Modelo de Regresión Lineal Múltiple
-Busca encontrar la ecuación matemática óptima que prediga el $xG$ de un equipo en un partido determinado basándose en métricas de rendimiento histórico propio y del rival.
-* **Estimación por Mínimos Cuadrados (OLS):** Evalúa un modelo lineal uniendo todas las variables explicativas continuas extraídas en Python.
-* **Selección de Variables:** Permite aislar y contrastar qué coeficientes ($eta_i$) poseen significación estadística real ($p	ext{-valor} < 0.05$) y cuantificar en cuánto incrementa el $xG$ estimado por cada unidad que aumenta una métrica específica (como las acciones de creación de gol `GCA90`).
+## Limitations
 
-### 3. Justificación Estadística de la Localía (ANOVA)
-El script aborda matemáticamente la eterna premisa futbolística: *"¿Los equipos juegan mejor y generan más peligro cuando actúan en su propio estadio?"*.
-* **Análisis de Varianza (ANOVA):** Utiliza la variable cualitativa/categórica `Localía` (Local / Visitante) como factor de clasificación.
-* **Contraste de Medias:** Evalúa si la variabilidad de los goles esperados explicada por el hecho de jugar en casa es significativamente mayor que la variabilidad residual intrínseca de los partidos. El resultado arroja una demostración formal de que el factor de localía eleva de manera estadísticamente significativa la media de $xG$ generada por encuentro.
+- **Explanatory, not predictive.** Team profiles are season aggregates that include the very
+  matches being explained (the initial full model even includes the final league rank), so the models
+  describe associations; they say nothing about out-of-sample forecasting.
+- **Dependent observations.** Two rows per match and repeated observations of the same teams
+  violate independence (confirmed by the Durbin–Watson tests); together with non-normal,
+  heteroscedastic residuals, the reported p-values and intervals are optimistic. Cluster-robust
+  standard errors or a mixed model (team and match effects) would be the natural next step.
+- **Weighting scheme.** With three seasons the weights are 0.29 (most recent), 0.45 (middle) and
+  0.26 (oldest), so the middle season dominates. The two-season branch intended to give 0.7 to
+  2025-26 never triggers (`"2025-2026" in grupo["Temporada"]` tests the index, not the values), so
+  every two-season team gets 0.75 / 0.25.
+- **Pipeline glue.** `Obtencion de los datos.py` reads from a hard-coded local Windows path and
+  writes an `.xlsx`, while `script.R` expects `Datos_Partidos.csv`; a manual conversion step is
+  required. FBref table positions are hard-coded and may break if the site layout changes.
 
-### 4. Modelo de Regresión Avanzado con Covariables (ANCOVA)
-Para hilar más fino, el script combina el poder predictivo de las variables cuantitativas y cualitativas implementando un **Análisis de Covarianza (ANCOVA)**.
-* **Efecto Combinado:** Estudia cómo varía el impacto de métricas puras de ataque (como la posesión de balón o tasas de tiro) sobre el $xG$ en función de si el equipo está actuando en su estadio o en territorio visitante.
-* **Interacciones Estadísticas:** El modelo evalúa términos de interacción para dilucidar si las pendientes de regresión varían según el contexto geográfico del partido, demostrando que en entornos visitantes las dinámicas de ataque requieren un volumen de aproximaciones diferente para generar la misma peligrosidad esperada.
+## Reproduction
 
-### 5. Diagnóstico de los Modelos y Validación de Hipótesis
-Para validar las inferencias de los modelos lineales previos, el script somete los residuos a un escrutinio matemático severo mediante tests formales de hipótesis:
-* **Normalidad de Residuos:** Se contrasta formalmente mediante el **Test de Shapiro-Wilk** (`shapiro.test()`), evaluando si los errores del modelo se distribuyen de manera normal.
-* **Homocedasticidad (Varianza Constante):** Se computa el **Test de Breusch-Pagan** (`bptest()`) y contrastes avanzados como `hmctest()` y `harvtest()` para validar que la variabilidad de los residuos permanece constante en todo el espectro predictivo.
-* **Análisis de Atípicos (Outliers):** El script realiza un proceso de depuración estadística filtrando y eliminando registros anómalos o de influencia desmedida para reajustar los modelos y contrastar el impacto de estos sobre la robustez de las conclusiones estadísticas. El análisis demuestra con rigor matemático que las hipótesis principales se sostienen sólidamente aun abstrayéndose de ruidos puntuales en los datos.
-
----
-
-## 📈 Flujo General de Trabajo
-
+```bash
+pip install pandas lxml openpyxl
+python Partidos.py
+python "Datos por equipo.py"
+# edit the input paths at the top of "Obtencion de los datos.py", then:
+python "Obtencion de los datos.py"
+# export Datos_partidos.xlsx to Datos_Partidos.csv (same columns)
 ```
-[Fuentes Web FBref]
-       │
-       ▼
- 1. Partidos.py ───────► (Estructura base de partidos y localía) ──┐
- 2. Datos por equipo.py ► (Métricas avanzadas por temporada)       │
-       │                                                           ▼
-       ▼                                               4. Obtencion de los datos.py
- 3. Medias_ponderadas.py (Suavizado e histórico temporal) ───►     │
-                                                                   ▼
-                                                       [Datos_Partidos.csv]
-                                                                   │
-                                                                   ▼
-                                                              5. script.R
-                                                       (EDA + OLS + ANOVA + ANCOVA)
+
+```r
+install.packages(c("ggcorrplot", "car", "lmtest", "sm"))
+source("script.R")   # interactive: press Enter to step through the plots
 ```
+
+The scraping step was not executed for this README; FBref availability and table layout should be
+checked before running.
+
+## Technologies
+
+Python (pandas), R (`lm`, `car`, `lmtest`, `sm`, `ggcorrplot`), web scraping, linear models,
+ANOVA/ANCOVA, regression diagnostics.
+
+## Author
+
+**Fernando González González** — [LinkedIn](https://www.linkedin.com/in/fernando-gonzalez-gonzalez-math/) ·
+[GitHub](https://github.com/fernandogg2004)
